@@ -70,24 +70,45 @@ class _DemoPageState extends State<DemoPage> {
 на конфігурацію. Той самий `RenderObject` лишається живим, і йому лише
 кажуть перерахувати розмір/перемалюватися.
 
-```mermaid
-sequenceDiagram
-    participant U as Користувач
-    participant S as State (_DemoPageState)
-    participant W as Widget-дерево
-    participant E as Element-дерево
-    participant R as RenderObject-дерево
-
-    U->>S: тап на "+"
-    S->>S: setState(() => _counter++)
-    S->>E: markNeedsBuild()
-    E->>W: build() створює НОВИЙ Text('Лічильник: N')
-    E->>E: canUpdate(старий Text, новий Text)?
-    Note over E: runtimeType однаковий, key однаковий → true
-    E->>E: element.widget = новий Text (оновлення на місці)
-    E->>R: RenderParagraph.text = нове значення
-    R->>R: markNeedsLayout() + markNeedsPaint()
-```
+Користувач                 State(_DemoPageState)              Widget-дерево                 Element-дерево              RenderObject-дерево
+    │                              │                                │                             │                              │
+    │                              │                                │                             │                              │
+    │  тап на “+”                  │                                │                             │                              │
+    ├─────────────────────────────►│                                │                             │                              │
+    │                              │                                │                             │                              │
+    │                              │ setState()                     │                             │                              │
+    │                              │      ↻                         │                             │                              │
+    │                              │                                │                             │                              │
+    │                              │ markNeedsBuild()               │                             │                              │
+    │                              ├────────────────────────────────────────────────────────────►│                              │
+    │                              │                                │                             │                              │
+    │                              │                                │ build() створює:            │                              │
+    │                              │                                │ Новий Text('Лічильник: N')  │                              │
+    │                              │                                │◄────────────────────────────┤                              │
+    │                              │                                │                             │                              │
+    │                              │                                │                             │ canUpdate(old: Text,       │
+    │                              │                                │                             │ new: Text)?                 │
+    │                              │                                │                             │      ↻                       │
+    │                              │                                │                             │                              │
+    │                              │                                │                             │ ┌──────────────────────────┐ │
+    │                              │                                │                             │ │ runtimeType однаковий,  │ │
+    │                              │                                │                             │ │ key однаковий → true    │ │
+    │                              │                                │                             │ └──────────────────────────┘ │
+    │                              │                                │                             │                              │
+    │                              │                                │                             │ element.widget = новий      │
+    │                              │                                │                             │ Text (оновлення на місці)   │
+    │                              │                                │                             │      ↻                       │
+    │                              │                                │                             │                              │
+    │                              │                                │                             │ RenderParagraph.text =      │
+    │                              │                                │                             │ нове значення               │
+    │                              │                                │                             ├─────────────────────────────►│
+    │                              │                                │                             │                              │
+    │                              │                                │                             │                              │ markNeedsLayout() →
+    │                              │                                │                             │                              │ markNeedsPaint()
+    │                              │                                │                             │                              │      ↻
+    │                              │                                │                             │                              │
+    │                              │                                │                             │                              │
+Користувач                 State(_DemoPageState)              Widget-дерево                 Element-дерево              RenderObject-дерево
 
 **Ключове тут**: Widget-дерево перестворюється щоразу повністю (це дешево —
 це прості immutable-об'єкти), а Element- і RenderObject-дерева зберігаються
@@ -113,18 +134,48 @@ sequenceDiagram
    виконується повний layout і paint для цієї гілки, а не інкрементальне
    оновлення.
 
-```mermaid
-graph TD
-    A["setState змінює _showIcon"] --> B["build() повертає Icon замість Text"]
-    B --> C{"Element.canUpdate(старий Text, новий Icon)"}
-    C -- "runtimeType різний → false" --> D["Старий Element: deactivate + unmount"]
-    D --> E["Старий RenderObject: detach + dispose"]
-    C -- "false" --> F["Створюється новий Element для Icon"]
-    F --> G["Новий Element створює новий RenderObject"]
-    G --> H["Новий RenderObject вставляється в дерево: повний layout + paint"]
-```
-
----
+                    ┌────────────────────────────┐
+                    │ setState змінює _showIcon  │
+                    └────────────────────────────┘
+                                  │
+                                  ▼
+                    ┌────────────────────────────┐
+                    │ build() повертає Icon      │
+                    │ замість Text               │
+                    └────────────────────────────┘
+                                  │
+                                  ▼
+                            ╱───────────╲
+                           ╱             ╲
+                          ╱ Element.canUpdate ╲
+                         ╱ (старий Text,      ╲
+                        ╱ новий Icon)          ╲
+                        ╲                       ╱
+                         ╲                     ╱
+                          ╲───────────────────╱
+                            ╱               ╲
+                           ╱                 ╲
+                          ▼                   ▼
+              runtimeType різний → false     false
+                          │                   │
+                          ▼                   ▼
+          ┌────────────────────────┐   ┌────────────────────────┐
+          │ Старий Element:        │   │ Створюється новий       │
+          │ deactivate             │   │ Element для Icon        │
+          │ + unmount              │   └────────────────────────┘
+          └────────────────────────┘              │
+                          │                       ▼
+                          ▼              ┌────────────────────────┐
+          ┌────────────────────────┐    │ Новий Element створює  │
+          │ Старий RenderObject:   │    │ новий RenderObject      │
+          │ detach + dispose      │    └────────────────────────┘
+          └────────────────────────┘              │
+                                                  ▼
+                                         ┌─────────────────────────┐
+                                         │ Новий RenderObject      │
+                                         │ вставляється в дерево:  │
+                                         │ новий layout + paint     │
+                                         └─────────────────────────┘
 
 ## 4. Правило: коли Flutter перевикористовує `Element`
 

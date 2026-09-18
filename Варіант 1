@@ -1,0 +1,171 @@
+# Практична робота 2: Технологія Flutter — Варіант 1
+
+## Три дерева Flutter: Widget, Element, RenderObject
+
+### Мета
+
+Показати на конкретному прикладі, що саме відбувається з трьома деревами Flutter
+(Widget → Element → RenderObject) під час перебудови інтерфейсу, і сформулювати
+правило, коли Flutter перевикористовує вузли, а коли створює їх заново.
+
+---
+
+## 1. Мінімальний приклад
+
+Нижче — один застосунок із двома кнопками:
+- перша кнопка змінює **текст** (той самий тип віджета);
+- друга — змінює **тип віджета** (`Text` → `Icon`), щоб продемонструвати другий сценарій.
+
+```dart
+import 'package:flutter/material.dart';
+
+void main() => runApp(const MaterialApp(home: DemoPage()));
+
+class DemoPage extends StatefulWidget {
+  const DemoPage({super.key});
+  @override
+  State<DemoPage> createState() => _DemoPageState();
+}
+
+class _DemoPageState extends State<DemoPage> {
+  int _counter = 0;
+  bool _showIcon = false;
+
+  void _bumpText() => setState(() => _counter++);
+  void _swapType() => setState(() => _showIcon = !_showIcon);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: _showIcon
+            ? const Icon(Icons.star, size: 40)
+            : Text('Лічильник: $_counter'),
+      ),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FloatingActionButton(onPressed: _bumpText, child: const Icon(Icons.add)),
+          FloatingActionButton(onPressed: _swapType, child: const Icon(Icons.swap_horiz)),
+        ],
+      ),
+    );
+  }
+}
+```
+
+(Файл лежить у `demo/main.dart`.)
+
+---
+
+## 2. Сценарій 1: змінюється лише текст (`_bumpText`)
+
+Натискання першої кнопки викликає `setState()`, яке позначає `Element` як
+"потребує перебудови" і планує наступний кадр. Під час перебудови `build()`
+створює **новий об'єкт `Text`** — Widget-дерево завжди створюється заново,
+бо віджети immutable. Але Element-дерево не викидається: framework порівнює
+старий і новий віджет на тій самій позиції за допомогою перевірки
+`Element.canUpdate` — той самий `runtimeType` і той самий `key` означають,
+що можна оновити наявний `Element` "на місці", просто підмінивши посилання
+на конфігурацію. Той самий `RenderObject` лишається живим, і йому лише
+кажуть перерахувати розмір/перемалюватися.
+
+```mermaid
+sequenceDiagram
+    participant U as Користувач
+    participant S as State (_DemoPageState)
+    participant W as Widget-дерево
+    participant E as Element-дерево
+    participant R as RenderObject-дерево
+
+    U->>S: тап на "+"
+    S->>S: setState(() => _counter++)
+    S->>E: markNeedsBuild()
+    E->>W: build() створює НОВИЙ Text('Лічильник: N')
+    E->>E: canUpdate(старий Text, новий Text)?
+    Note over E: runtimeType однаковий, key однаковий → true
+    E->>E: element.widget = новий Text (оновлення на місці)
+    E->>R: RenderParagraph.text = нове значення
+    R->>R: markNeedsLayout() + markNeedsPaint()
+```
+
+**Ключове тут**: Widget-дерево перестворюється щоразу повністю (це дешево —
+це прості immutable-об'єкти), а Element- і RenderObject-дерева зберігаються
+й лише мутуються там, де це можливо.
+
+---
+
+## 3. Сценарій 2: змінюється тип віджета (`_swapType`)
+
+Коли натиснута друга кнопка, `build()` цього разу повертає `Icon` замість
+`Text` на тому самому місці дерева. Перевірка `Element.canUpdate` тепер дає
+`false`, бо `runtimeType` різний (`Text` ≠ `Icon`). Один і той самий `Element`
+фізично не може представляти віджет іншого типу — його внутрішня структура
+(наприклад, `TextElement` тримає посилання саме на `RenderParagraph`) під це
+не розрахована. Тому framework:
+
+1. деактивує й демонтує старий `Element` разом з його `RenderObject`
+   (`detach()` → `dispose()`);
+2. інстанціює зовсім новий `Element` для `Icon`;
+3. цей новий `Element` створює свій новий `RenderObject`
+   (`RenderParagraph` замінюється на, наприклад, `RenderIcon`/`RenderImage`-подібний об'єкт);
+4. новий `RenderObject` вставляється в дерево рендерингу з нуля — тобто
+   виконується повний layout і paint для цієї гілки, а не інкрементальне
+   оновлення.
+
+```mermaid
+graph TD
+    A["setState змінює _showIcon"] --> B["build() повертає Icon замість Text"]
+    B --> C{"Element.canUpdate(старий Text, новий Icon)"}
+    C -- "runtimeType різний → false" --> D["Старий Element: deactivate + unmount"]
+    D --> E["Старий RenderObject: detach + dispose"]
+    C -- "false" --> F["Створюється новий Element для Icon"]
+    F --> G["Новий Element створює новий RenderObject"]
+    G --> H["Новий RenderObject вставляється в дерево: повний layout + paint"]
+```
+
+---
+
+## 4. Правило: коли Flutter перевикористовує `Element`
+
+На основі обох сценаріїв правило формулюється так:
+
+> Flutter оновлює наявний `Element` "на місці" (і, відповідно, зберігає
+> `RenderObject`) тоді й лише тоді, коли на одній і тій самій позиції в
+> списку дітей одного й того самого батьківського `Element` новий і старий
+> віджет мають **однаковий `runtimeType` та однаковий (або відсутній
+> однаково) `key`**. Якщо хоча б одна з цих умов не виконується — старий
+> `Element`/`RenderObject` знищуються, а нові створюються з нуля.
+
+Саме тому в списках, де порядок елементів може змінюватися (drag&drop,
+сортування, видалення посередині списку), рекомендується явно задавати
+`key` для дочірніх віджетів одного типу — без нього Flutter звіряє елементи
+за позицією, а не за "особистістю" даних, і може або зайво перестворити
+`RenderObject`, або, гірше, помилково зберегти стан не того елемента.
+
+**Доказ/джерело**: перевірка описана в офіційній статті Flutter "Inside
+Flutter" (розділ про Widgets, Elements, RenderObjects) та в документації
+класу `Element` (метод `canUpdate`) — https://docs.flutter.dev/resources/inside-flutter
+та https://api.flutter.dev/flutter/widgets/Element/canUpdate.html. Обидва
+джерела описують саме порівняння `runtimeType` та `key` як умову
+перевикористання елемента.
+
+---
+
+## 5. Висновок
+
+До цієї роботи здавалося, що "перебудова" — це просто "Flutter перемальовує
+екран заново". Насправді ж це триступеневий процес із трьома окремими
+деревами, кожне з яких існує саме для того, щоб уникнути найдорожчої
+операції — створення нового `RenderObject` (він тримає стан макета, зв'язки
+з "сусідами" по дереву рендерингу, кеш геометрії). Widget-дерево навмисно
+зроблене *завжди* одноразовим і дешевим (immutable-об'єкти без стану) —
+саме тому framework може дозволити собі створювати його заново на кожен
+кадр, не замислюючись про продуктивність. А от Element-дерево — це той шар,
+що фактично виконує "diffing", подібний до virtual DOM у React, тільки
+порівнює не піддерева цілком, а пару (тип, key) на кожній позиції окремо.
+Звідси й практичний висновок, якого лекція прямо не проговорювала: ціна
+перебудови залежить не від того, скільки коду в `build()`, а від того,
+**скільки віджетів у результаті змінили тип або key відносно попереднього
+кадру** — саме ці вузли, а не решта дерева, спричиняють дорогі
+create/dispose RenderObject.
